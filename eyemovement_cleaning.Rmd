@@ -1,0 +1,241 @@
+---
+title: "Distractor Rejection Data Set Filtering"
+output:
+  html_document:
+    theme: cosmo
+    highlight: zenburn
+  pdf_document: default
+---
+
+# Import libraries
+
+```{r, message=FALSE}
+source("funs.R")
+library(ggpubr)
+```
+
+# Read Data from E-Prime
+
+One caveat: eMerge adds an export location as a first line in the merged data set. 
+Delete that line manually or else R will read it in incorrectly.
+
+```{r, step1.1}
+behavioral <- read_csv("disrej_color_edat.csv")
+behavioral
+```
+
+## E-Prime Column Names
+
+Variable names in the original file contain square brackets, periods, and capital 
+letters which can make the data impossible to work with, so we have to rename the
+columns. This one only replaces periods and brackets with underscores which is not
+perfect but is enough to make the data analyzable.
+
+```{r, step1.2}
+behavioral <- behavioral %>%
+  rename_with(~sub('[.]+', '_', .), perl=TRUE) %>%
+  rename_with(~sub('\\[', '_', .), perl=TRUE) %>%
+  rename_with(~sub('\\]', '_', .), perl=TRUE) %>%
+  rename_with(~sub('_$', '', .), perl=TRUE) %>%
+  filter(Running_Block == "BlockList") 
+```
+## E-Prime Data Filtering
+
+Now filter out all blocks that are not 'BlockList' so
+that we are using the data only from the real trials. Then, it will create a
+tibble, where 'Subject' is the subject number and 'accuracy' is their accuracy 
+for all trials in percent. The best way is to just eyeball it and see where the 
+accuracy is lower than 70%, then remember the subject numbers for the next step.
+
+
+```{r, step1.3}
+behavioral %>%
+  group_by(Subject) %>%
+  summarize(accuracy = (sum(Query_ACC_Trial) / n() * 100))
+```
+
+# Read Data from EyeLink
+
+Import the Interest Area Report.
+
+```{r, step2.1}
+ia <- read_csv("disrej_color_data.csv")
+ia
+```
+
+## Remove Specific Subjects
+
+In this step, the data from specific subject numbers is removed. Subject numbers
+from the accuracy calculation step go in here. Also, if the data was not recorded
+for some participants, it's also removed in here. From Distractor Rejection Color
+experiment, participant 6 did not have a part of the block recorded, so I will
+remove it here from the eye movement data set.
+
+-- I commented out the code that removes 6 since invalid trials will be removed
+with the filters below.
+
+```{r, step2.2}
+ia <- ia %>%
+  group_by(Subject_Num) #%>%
+  #filter(Subject_Num != c(6))
+ia
+```
+
+## Clean eye movement data
+
+Looking at IA label and creating a new column (is_target) that will note whether
+an IA is a distractor or a target. Also, putting the information about whether
+an interest are was fixated on into the 'did_fixate' column.
+
+```{r, step2.3}
+ia <- ia %>%
+  mutate(is_target = "default") %>%
+  mutate(is_target = if_else(startsWith(IA_LABEL, "T"), "Target", is_target)) %>%
+  mutate(is_target = if_else(startsWith(IA_LABEL, "D"), "Distractor", is_target)) %>%
+  mutate(did_fixate = "default") %>%
+  mutate(did_fixate = if_else(IA_FIRST_RUN_FIXATION_COUNT %in% c("."), 0, 1))
+ia
+```
+
+## Outlier Removal
+
+Calculating mean +- SD for the whole data set and then comparing each RT such that
+it should be between 2.5 mean-SD and 200.
+
+```{r, step2.4}
+sd_above <- mean(ia$VS_RT) + (2.5 * sd(ia$VS_RT))
+
+ia <- ia %>%
+  group_by(Subject_Num, TrialNum) %>%
+  filter(between(VS_RT, 200, sd_above))
+ia
+```
+
+## More Filtering
+
+This step should include RT between 200 and 2.5SD, did_fixate = 1, is_target = "Target".
+I did not include the accuracy filter since this data is in the other table, so it 
+will be filtered after a table join. I also excluded Block_Num 'UNDEFINED' since
+it refers to the practice trials.
+
+```{r, step2.5}
+ia <- ia %>%
+  filter(is_target == "Target") %>%
+  filter(did_fixate == 1) %>%
+  filter(Block_Num != "UNDEFINED")
+ia
+```
+
+## Join tables
+
+Behavioral and the IA table contain the data that are carved up differently (by-trial and by-IA),
+so it has to be joined by the subject number, block number, and the trial number to display correctly.
+Since there are almost 300 features in this data set, it makes sense to leave only
+the important ones. Also, I changed the data type of Block_Num back to numeric as
+it was 'chr' because of some values being UNDEFINED. Also the accuracy filter is 
+applied here.
+
+Another modification here is the 1101ms correction applied to the ia_first_fixation_time.
+The accuracy filter is applied here as well as the ttp > 50 and ia_first_fixation_time > 0.
+
+
+```{r, step2.6}
+ia <- ia %>%
+  mutate(Block_Num = as.numeric(Block_Num)) %>%
+  left_join(behavioral, by = c("Subject_Num" = "Subject", "TrialNum" = "TrialNum_Trial", "Block_Num" = "BlockNum_Block")) %>%
+  filter(Query_ACC_Trial == 1) %>%
+  select(Subject_Num, Block_Num, TrialNum, DistType, VS_RT, IA_FIRST_FIXATION_INDEX,IA_FIRST_FIXATION_RUN_INDEX, IA_FIRST_FIXATION_VISITED_IA_COUNT, IA_FIRST_FIXATION_TIME, IA_DWELL_TIME, VSTarget_Trial, INTEREST_AREA_FIXATION_SEQUENCE) %>%
+  mutate(IA_FIRST_FIXATION_INDEX = as.numeric(IA_FIRST_FIXATION_INDEX)) %>%
+  mutate(IA_FIRST_FIXATION_RUN_INDEX = as.numeric(IA_FIRST_FIXATION_RUN_INDEX)) %>%
+  mutate(IA_FIRST_FIXATION_VISITED_IA_COUNT = as.numeric(IA_FIRST_FIXATION_VISITED_IA_COUNT)) %>%
+  mutate(IA_FIRST_FIXATION_TIME = as.numeric(IA_FIRST_FIXATION_TIME) - 1101) %>%
+  mutate(IA_DWELL_TIME = as.numeric(IA_DWELL_TIME)) %>%
+  mutate(ttp = VS_RT - IA_FIRST_FIXATION_TIME) %>%
+  filter(ttp > 50) %>%
+  filter(IA_FIRST_FIXATION_TIME > 0)
+
+colnames(ia) <- stri_trans_tolower(names(ia)) # make the col-names lowercase
+ia
+```
+
+## Categorize
+
+Read in the object category data set that has the object category matched with
+the file names and the mds category table that specifies the MDS values for each 
+category. Join both tables with the main data set.
+
+```{r, step 2.7}
+obj_cat <- read_csv("categories.csv")
+mds <- read_csv("mds_categories.csv")
+
+ia <- ia %>%
+  left_join(obj_cat, by = c("vstarget_trial" = "filename")) %>%
+  left_join(mds, by = c("category")) %>%
+  select(subject_num, block_num, trialnum, disttype, vs_rt, ia_first_fixation_index, ia_first_fixation_run_index, ia_first_fixation_visited_ia_count, ia_first_fixation_time, ia_dwell_time, ttp, category, mds_category, interest_area_fixation_sequence)
+  
+ia
+```
+
+## Prepare and Export
+
+Take each DV and and create a table for the analyses that will be written into 
+separate CSV files.
+
+```{r, step 2.8}
+
+ia %>%
+  ungroup() %>%
+  select(subject_num, block_num, trialnum, disttype, mds_category, vs_rt) %>%
+  pivot_wider(names_from = c(disttype, mds_category), values_from = vs_rt) %>%
+  group_by(subject_num) %>%
+  summarize(close_high = mean(Close_high, na.rm = TRUE), close_low = mean(Close_low, na.rm = TRUE), far_low = mean(Far_low, na.rm = TRUE), far_high = mean(Far_high, na.rm = TRUE)) %>%
+  write.csv("analysis_vsrt.csv")
+
+ia %>%
+  ungroup() %>%
+  select(subject_num, block_num, trialnum, disttype, mds_category, ia_first_fixation_index) %>%
+  pivot_wider(names_from = c(disttype, mds_category), values_from = ia_first_fixation_index) %>%
+  group_by(subject_num) %>%
+  summarize(close_high = mean(Close_high, na.rm = TRUE), close_low = mean(Close_low, na.rm = TRUE), far_low = mean(Far_low, na.rm = TRUE), far_high = mean(Far_high, na.rm = TRUE)) %>%
+  write.csv("analysis_ia_first_fixation_index.csv")
+
+ia %>%
+  ungroup() %>%
+  select(subject_num, block_num, trialnum, disttype, mds_category, ia_first_fixation_run_index) %>%
+  pivot_wider(names_from = c(disttype, mds_category), values_from = ia_first_fixation_run_index) %>%
+  group_by(subject_num) %>%
+  summarize(close_high = mean(Close_high, na.rm = TRUE), close_low = mean(Close_low, na.rm = TRUE), far_low = mean(Far_low, na.rm = TRUE), far_high = mean(Far_high, na.rm = TRUE)) %>%
+  write.csv("analysis_ia_first_fixation_run_index.csv")
+
+ia %>%
+  ungroup() %>%
+  select(subject_num, block_num, trialnum, disttype, mds_category, ia_first_fixation_visited_ia_count) %>%
+  pivot_wider(names_from = c(disttype, mds_category), values_from = ia_first_fixation_visited_ia_count) %>%
+  group_by(subject_num) %>%
+  summarize(close_high = mean(Close_high, na.rm = TRUE), close_low = mean(Close_low, na.rm = TRUE), far_low = mean(Far_low, na.rm = TRUE), far_high = mean(Far_high, na.rm = TRUE)) %>%
+  write.csv("analysis_ia_first_fixation_visited_ia_count.csv")
+
+ia %>%
+  ungroup() %>%
+  select(subject_num, block_num, trialnum, disttype, mds_category, ia_first_fixation_time) %>%
+  pivot_wider(names_from = c(disttype, mds_category), values_from = ia_first_fixation_time) %>%
+  group_by(subject_num) %>%
+  summarize(close_high = mean(Close_high, na.rm = TRUE), close_low = mean(Close_low, na.rm = TRUE), far_low = mean(Far_low, na.rm = TRUE), far_high = mean(Far_high, na.rm = TRUE)) %>%
+  write.csv("analysis_ia_first_fixation_time.csv")
+
+ia %>%
+  ungroup() %>%
+  select(subject_num, block_num, trialnum, disttype, mds_category, ia_dwell_time) %>%
+  pivot_wider(names_from = c(disttype, mds_category), values_from = ia_dwell_time) %>%
+  group_by(subject_num) %>%
+  summarize(close_high = mean(Close_high, na.rm = TRUE), close_low = mean(Close_low, na.rm = TRUE), far_low = mean(Far_low, na.rm = TRUE), far_high = mean(Far_high, na.rm = TRUE)) %>%
+  write.csv("analysis_ia_dwell_time.csv")
+
+ia %>%
+  ungroup() %>%
+  select(subject_num, block_num, trialnum, disttype, mds_category, ttp) %>%
+  pivot_wider(names_from = c(disttype, mds_category), values_from = ttp) %>%
+  group_by(subject_num) %>%
+  summarize(close_high = mean(Close_high, na.rm = TRUE), close_low = mean(Close_low, na.rm = TRUE), far_low = mean(Far_low, na.rm = TRUE), far_high = mean(Far_high, na.rm = TRUE)) %>%
+  write.csv("analysis_ttp.csv")
+```
